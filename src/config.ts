@@ -23,9 +23,13 @@ export type PermissionMode =
   | 'default'
   | 'dangerously-skip-permissions'
 
+export type GroupResponseMode = 'always' | 'dynamic'
+
 export interface GroupPolicy {
   requireMention: boolean
   allowFrom: string[]
+  /** 'always' (default): reply to every delivered message. 'dynamic': observe all messages and decide whether to reply or output NO_REPLY. */
+  responseMode?: GroupResponseMode
 }
 
 export interface PendingPairing {

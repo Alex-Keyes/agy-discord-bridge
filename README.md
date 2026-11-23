@@ -14,7 +14,7 @@ When a message arrives on Discord, the bridge gates it against your allowlist, f
   - `fetch_messages` (oldest-first history lookback up to 100 messages with `+Natt` markers)
   - `download_attachment` (on-demand download to local inbox)
   - `create_thread` (start public threads from a channel or message)
-- **Zero double-posting & zero silent drops** — if Antigravity calls `reply`, the bridge skips duplicate posting; if it responds in plain text without calling `reply`, the bridge posts the response automatically.
+- **Zero double-posting, zero silent drops, and optional dynamic responses** — if Antigravity calls `reply`, the bridge skips duplicate posting; if it responds in plain text without calling `reply`, the bridge posts the response automatically; and in `--dynamic` channels (or anytime the agent outputs `NO_REPLY`), Antigravity can observe all messages and selectively chime in, react, or stay silent without flashing typing indicators.
 - **Persistent sessions per channel / thread / DM** — keeps a warm `agy` process per chat, queues concurrent turns safely, saves `conversation_id` in `~/.agy-discord/sessions.json` to resume seamlessly across restarts, and reaps idle processes to save memory.
 - **Full access control & security** — DM pairing codes (1h TTL, 2-reply cap, 3-pending cap, confirmation DM on approval), allowlists, per-channel guild opt-in, thread inheritance, reply-to-bot & `mentionPatterns` detection, `DISCORD_ACCESS_MODE=static`, corrupt config recovery, and bot-loop prevention.
 - **Antigravity Plugin included (`./plugin`)** — install with `agy plugin install ./plugin` to get `/discord:access` and `/discord:configure` slash commands in interactive `agy` sessions.
@@ -84,6 +84,9 @@ tmux new -s agy-discord -c /path/to/your/project \
 
    # Respond to every message in a dedicated channel
    bun run access group add <CHANNEL_ID> --allow <YOUR_USER_ID> --no-mention
+
+   # Observe all messages and dynamically decide when to chime in, react, or stay silent (NO_REPLY)
+   bun run access group add <CHANNEL_ID> --allow <YOUR_USER_ID> --dynamic
    ```
 
 See **[ACCESS.md](./ACCESS.md)** for full access control, mention regexes, and delivery tuning (`ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`).

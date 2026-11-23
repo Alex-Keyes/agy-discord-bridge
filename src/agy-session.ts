@@ -419,7 +419,7 @@ class ChatSession {
               ? `${text}\n\n_(status: ${status} — ${res.error})_`
               : text
           turn.resolve({
-            response: finalText || '(completed with no text output)',
+            response: finalText,
             conversationId: this.conversationId,
             status,
             durationSeconds: res?.duration_seconds,

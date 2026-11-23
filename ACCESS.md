@@ -49,12 +49,24 @@ bun run access group add 846209781206941736
 # Respond to every message in a dedicated channel (no @mention needed)
 bun run access group add 846209781206941736 --no-mention
 
+# Observe all messages and dynamically decide whether to chime in, react, or stay silent
+bun run access group add 846209781206941736 --dynamic
+
 # Restrict which users can trigger the bot in a channel
 bun run access group add 846209781206941736 --allow 184695080709324800,221773638772129792
 
 # Remove a channel
 bun run access group rm 846209781206941736
 ```
+
+### Dynamic / selective response mode (`--dynamic`)
+
+Adding a channel with `--dynamic` sets `"requireMention": false` and `"responseMode": "dynamic"`. In dynamic mode:
+
+- Every message from allowed users is forwarded to Antigravity with `mode="dynamic"` and `mentioned="true|false"` attributes.
+- For unmentioned messages (`mentioned="false"`), the bridge skips `ackReaction` and the automatic typing indicator so casual conversation isn't interrupted.
+- Antigravity decides whether to reply, react, or stay quiet by outputting `NO_REPLY` (which suppresses any fallback reply).
+- Direct `@mentions`, replies to the bot, and `mentionPatterns` matches still arrive with `mentioned="true"` and behave like normal direct prompts.
 
 ## Mention detection
 
@@ -95,7 +107,7 @@ bun run access set chunkMode newline
 | `bun run access allow <userId>` | Add a user snowflake directly. |
 | `bun run access remove <userId>` | Remove a user snowflake from `allowFrom`. |
 | `bun run access policy <mode>` | Set `dmPolicy`: `pairing`, `allowlist`, or `disabled`. |
-| `bun run access group add <channelId>` | Opt in a guild channel. Flags: `--no-mention`, `--allow id1,id2`. |
+| `bun run access group add <channelId>` | Opt in a guild channel. Flags: `--no-mention`, `--dynamic`, `--always`, `--allow id1,id2`. |
 | `bun run access group rm <channelId>` | Disable a guild channel. |
 | `bun run access set <key> <value>` | Set `ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, or `mentionPatterns`. |
 | `bun run configure [<token>\|clear]` | Show token/access status, save `DISCORD_BOT_TOKEN` (`chmod 600`), or clear it. |

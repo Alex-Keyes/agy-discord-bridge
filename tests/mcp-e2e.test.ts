@@ -16,8 +16,12 @@ describe('in-process Streamable HTTP MCP server', () => {
     try {
       // Ephemeral runtime workspace has both .agents/mcp_config.json and AGENTS.md
       const mcpCfgPath = join(srv.runtimeDir, '.agents', 'mcp_config.json')
+      const agentsMdPath = join(srv.runtimeDir, 'AGENTS.md')
       expect(existsSync(mcpCfgPath)).toBe(true)
-      expect(existsSync(join(srv.runtimeDir, 'AGENTS.md'))).toBe(true)
+      expect(existsSync(agentsMdPath)).toBe(true)
+      const agentsMd = readFileSync(agentsMdPath, 'utf8')
+      expect(agentsMd).toContain('mode="dynamic"')
+      expect(agentsMd).toContain('NO_REPLY')
       const mcpCfg = JSON.parse(readFileSync(mcpCfgPath, 'utf8'))
       expect(mcpCfg.mcpServers.discord.serverUrl).toBe(srv.url)
       expect(mcpCfg.mcpServers.discord.headers.Authorization).toBe(`Bearer ${srv.bearerToken}`)

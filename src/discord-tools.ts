@@ -464,7 +464,11 @@ export class DiscordToolbox {
       text = `message already has a thread, which keeps its current name (id: ${message_id})`
     }
     text += ' — use it as chat_id to reply there.'
-    if (this.accessStore.load().groups[ch.id]?.requireMention ?? true) {
+    const parentGroup = this.accessStore.load().groups[ch.id]
+    if (parentGroup?.responseMode === 'dynamic') {
+      text +=
+        ' As in the parent channel, dynamic response mode is active there (you observe all messages and choose whether to reply or output NO_REPLY).'
+    } else if (parentGroup?.requireMention ?? true) {
       text +=
         ' As in the parent channel, people must @mention you or reply to one of your messages to reach you there.'
     }

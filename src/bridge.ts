@@ -16,6 +16,7 @@ import { chunkText } from './chunk.ts'
 import {
   type AccessConfig,
   AccessStore,
+  type GroupResponseMode,
   MAX_CHUNK_LIMIT,
   type PermissionMode,
   getStateDir,
@@ -27,6 +28,11 @@ import {
 } from './config.ts'
 import { DiscordToolbox } from './discord-tools.ts'
 import { startDiscordMcpServer } from './mcp-server.ts'
+import {
+  evaluateGroupPolicy,
+  needsMentionCheck,
+  shouldSuppressFallbackReply,
+} from './response-policy.ts'
 
 const stateDir = getStateDir()
 const runtime = loadRuntimeConfig(stateDir)
@@ -71,7 +77,13 @@ function isSendable(
 }
 
 type GateResult =
-  | { action: 'deliver'; access: AccessConfig }
+  | {
+      action: 'deliver'
+      access: AccessConfig
+      responseMode: GroupResponseMode
+      mentioned: boolean
+      isDynamicAmbient: boolean
+    }
   | { action: 'drop' }
   | { action: 'pair'; code: string; isResend: boolean }
 
@@ -108,7 +120,15 @@ async function gate(msg: Message): Promise<GateResult> {
   const isDM = msg.channel.type === ChannelType.DM
 
   if (isDM) {
-    if (access.allowFrom.includes(senderId)) return { action: 'deliver', access }
+    if (access.allowFrom.includes(senderId)) {
+      return {
+        action: 'deliver',
+        access,
+        responseMode: 'always',
+        mentioned: true,
+        isDynamicAmbient: false,
+      }
+    }
     if (access.dmPolicy === 'allowlist') return { action: 'drop' }
 
     const res = issuePairingCode(access, senderId, msg.author.username, msg.channelId)
@@ -125,16 +145,19 @@ async function gate(msg: Message): Promise<GateResult> {
   const policy = access.groups[policyChannelId]
   if (!policy) return { action: 'drop' }
 
-  const groupAllowFrom = policy.allowFrom ?? []
-  const requireMention = policy.requireMention ?? true
+  const mentioned = needsMentionCheck(policy)
+    ? await isMentioned(msg, access.mentionPatterns)
+    : false
+  const decision = evaluateGroupPolicy(policy, senderId, mentioned)
+  if (decision.action === 'drop') return { action: 'drop' }
 
-  if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
-    return { action: 'drop' }
+  return {
+    action: 'deliver',
+    access,
+    responseMode: decision.responseMode,
+    mentioned: decision.mentioned,
+    isDynamicAmbient: decision.isDynamicAmbient,
   }
-  if (requireMention && !(await isMentioned(msg, access.mentionPatterns))) {
-    return { action: 'drop' }
-  }
-  return { action: 'deliver', access }
 }
 
 /**
@@ -189,7 +212,11 @@ function escapeXmlAttr(val: string): string {
   return val.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-async function buildInboundPrompt(msg: Message, cleanedText: string): Promise<string> {
+async function buildInboundPrompt(
+  msg: Message,
+  cleanedText: string,
+  options?: { responseMode?: GroupResponseMode; mentioned?: boolean },
+): Promise<string> {
   const attrs: Array<[string, string]> = [
     ['source', 'discord'],
     ['chat_id', msg.channelId],
@@ -201,6 +228,11 @@ async function buildInboundPrompt(msg: Message, cleanedText: string): Promise<st
 
   if (msg.channel.type !== ChannelType.DM && 'name' in msg.channel && msg.channel.name) {
     attrs.push(['channel_name', `#${msg.channel.name}`])
+  }
+
+  if (options?.responseMode === 'dynamic') {
+    attrs.push(['mode', 'dynamic'])
+    attrs.push(['mentioned', options.mentioned ? 'true' : 'false'])
   }
 
   const downloadedNote: string[] = []
@@ -418,14 +450,16 @@ async function handleInbound(msg: Message): Promise<void> {
   if (await handleCommand(msg, cleanedText)) return
   if (!cleanedText && msg.attachments.size === 0) return
 
-  // Ack reaction (fire-and-forget, matching Claude's official connector)
-  if (access.ackReaction) {
+  const isDynamicAmbient = result.isDynamicAmbient
+
+  // Ack reaction (fire-and-forget; suppressed for unmentioned ambient messages in dynamic mode)
+  if (access.ackReaction && !isDynamicAmbient) {
     void msg.react(access.ackReaction).catch(() => {})
   }
 
-  // Typing indicator loop while agy works
+  // Typing indicator loop while agy works (suppressed for unmentioned ambient messages in dynamic mode)
   let typingTimer: ReturnType<typeof setInterval> | null = null
-  if (isSendable(msg.channel)) {
+  if (isSendable(msg.channel) && !isDynamicAmbient) {
     void msg.channel.sendTyping().catch(() => {})
     typingTimer = setInterval(() => {
       if (isSendable(msg.channel)) {
@@ -435,23 +469,33 @@ async function handleInbound(msg: Message): Promise<void> {
   }
 
   try {
-    const prompt = await buildInboundPrompt(msg, cleanedText)
+    const prompt = await buildInboundPrompt(msg, cleanedText, {
+      responseMode: result.responseMode,
+      mentioned: result.mentioned,
+    })
     const session = sessions.get(msg.channelId)
     const turnResult = await session.send(prompt)
 
-    // Only auto-post final text if the agent did not already send via the `reply` MCP tool.
-    if (!turnResult.repliedViaTool) {
-      await sendFallbackReply(msg, turnResult.response, access)
+    // Only auto-post final text if the agent did not already send via `reply` and did not opt to stay silent.
+    if (
+      !shouldSuppressFallbackReply(turnResult, {
+        isDynamic: result.responseMode === 'dynamic',
+      })
+    ) {
+      const text = turnResult.response.trim() || '(completed with no text output)'
+      await sendFallbackReply(msg, text, access)
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err)
     console.error(`[bridge] Error handling message ${msg.id}:`, errMsg)
-    await msg.react('❌').catch(() => {})
-    await sendFallbackReply(
-      msg,
-      `Error from Antigravity:\n\`\`\`\n${errMsg.slice(0, 1500)}\n\`\`\``,
-      access,
-    ).catch(() => {})
+    if (!isDynamicAmbient) {
+      await msg.react('❌').catch(() => {})
+      await sendFallbackReply(
+        msg,
+        `Error from Antigravity:\n\`\`\`\n${errMsg.slice(0, 1500)}\n\`\`\``,
+        access,
+      ).catch(() => {})
+    }
   } finally {
     if (typingTimer) clearInterval(typingTimer)
   }

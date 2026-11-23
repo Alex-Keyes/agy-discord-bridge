@@ -87,6 +87,23 @@ describe('pairing and access store', () => {
     const files = readdirSync(dir)
     expect(files.some(f => f.startsWith('access.json.corrupt-'))).toBe(true)
   })
+
+  test('preserves group responseMode across save and read', () => {
+    const dir = makeTempDir()
+    const access = defaultAccess()
+    access.groups['123456'] = {
+      requireMention: false,
+      responseMode: 'dynamic',
+      allowFrom: ['u1'],
+    }
+    saveAccessFile(access, dir)
+    const loaded = readAccessFile(dir)
+    expect(loaded.groups['123456']).toEqual({
+      requireMention: false,
+      responseMode: 'dynamic',
+      allowFrom: ['u1'],
+    })
+  })
 })
 
 describe('security guards and token storage', () => {

@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 import {
+  type GroupPolicy,
+  type GroupResponseMode,
   MAX_CHUNK_LIMIT,
   getStateDir,
   getStatePaths,
@@ -24,8 +26,8 @@ Commands:
   allow <userId>                               Add a Discord user snowflake to the DM allowlist (alias: dm add)
   remove <userId>                              Remove a Discord user snowflake from the DM allowlist (alias: dm remove)
   policy <pairing|allowlist|disabled>          Set DM policy
-  group add <channelId> [--no-mention] [--allow id1,id2]
-                                               Enable a guild channel
+  group add <channelId> [--no-mention] [--dynamic] [--allow id1,id2]
+                                               Enable a guild channel (--dynamic: observe all messages and reply selectively)
   group rm <channelId>                         Disable a guild channel (alias: group remove)
   set <key> <value>                            Set delivery/mention config:
                                                  ackReaction (emoji or "")
@@ -150,7 +152,7 @@ switch (cmd) {
     const channelId = args[2]
     if (!channelId || (sub !== 'add' && sub !== 'rm' && sub !== 'remove')) {
       console.error(
-        'Usage: bun run access group <add|rm> <channelId> [--allow id1,id2] [--no-mention]',
+        'Usage: bun run access group <add|rm> <channelId> [--allow id1,id2] [--no-mention] [--dynamic]',
       )
       process.exit(1)
     }
@@ -164,12 +166,22 @@ switch (cmd) {
 
     let allowFrom: string[] = []
     let requireMention = true
+    let responseMode: GroupResponseMode | undefined
+    let explicitMention = false
+    let explicitDynamic = false
 
     for (let i = 3; i < args.length; i++) {
       if (args[i] === '--no-mention') {
         requireMention = false
       } else if (args[i] === '--mention') {
         requireMention = true
+        explicitMention = true
+      } else if (args[i] === '--dynamic') {
+        requireMention = false
+        responseMode = 'dynamic'
+        explicitDynamic = true
+      } else if (args[i] === '--always') {
+        responseMode = 'always'
       } else if (args[i] === '--allow' && args[i + 1]) {
         allowFrom = args[i + 1]!
           .split(',')
@@ -179,10 +191,20 @@ switch (cmd) {
       }
     }
 
-    access.groups[channelId] = { requireMention, allowFrom }
+    if (explicitMention && explicitDynamic) {
+      console.error('Cannot combine --mention and --dynamic (dynamic mode requires seeing unmentioned messages)')
+      process.exit(1)
+    }
+
+    const policy: GroupPolicy = {
+      requireMention,
+      allowFrom,
+      ...(responseMode ? { responseMode } : {}),
+    }
+    access.groups[channelId] = policy
     saveAccessFile(access, stateDir)
     console.log(
-      `Configured channel ${channelId}: requireMention=${requireMention}, allowFrom=[${allowFrom.join(', ')}]`,
+      `Configured channel ${channelId}: requireMention=${requireMention}, responseMode=${responseMode ?? 'always'}, allowFrom=[${allowFrom.join(', ')}]`,
     )
     break
   }

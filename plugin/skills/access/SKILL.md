@@ -18,7 +18,7 @@ All state lives in `~/.agy-discord/access.json` (or `$DISCORD_STATE_DIR/access.j
   "dmPolicy": "pairing",
   "allowFrom": ["<userSnowflake>"],
   "groups": {
-    "<channelSnowflake>": { "requireMention": true, "allowFrom": [] }
+    "<channelSnowflake>": { "requireMention": true, "allowFrom": [], "responseMode": "always" }
   },
   "pending": {
     "<6-char-code>": {
@@ -65,8 +65,8 @@ Missing file is equivalent to `{ "dmPolicy": "pairing", "allowFrom": [], "groups
 ### `policy <pairing|allowlist|disabled>`
 1. Validate mode, read `access.json`, set `dmPolicy`, write back.
 
-### `group add <channelId> [--no-mention] [--allow id1,id2]`
-1. Read `access.json`, set `groups[<channelId>] = { requireMention: !hasNoMention, allowFrom: parsedIds }`, write back.
+### `group add <channelId> [--no-mention] [--dynamic] [--always] [--allow id1,id2]`
+1. Read `access.json`, set `groups[<channelId>] = { requireMention: !(hasNoMention || hasDynamic), allowFrom: parsedIds, ...(responseMode ? { responseMode } : {}) }` (reject combining `--mention` and `--dynamic`), write back.
 
 ### `group rm <channelId>`
 1. Read `access.json`, delete `groups[<channelId>]`, write back.
