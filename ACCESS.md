@@ -64,7 +64,7 @@ bun run access group rm 846209781206941736
 Adding a channel with `--dynamic` sets `"requireMention": false` and `"responseMode": "dynamic"`. In dynamic mode:
 
 - Every message from allowed users is forwarded to Antigravity with `mode="dynamic"` and `mentioned="true|false"` attributes.
-- For unmentioned messages (`mentioned="false"`), the bridge skips `ackReaction` and the automatic typing indicator so casual conversation isn't interrupted.
+- For unmentioned messages (`mentioned="false"`), the bridge shows the typing indicator while Antigravity evaluates the message, but skips `ackReaction` so casual conversation isn't cluttered with receipt reactions.
 - Antigravity decides whether to reply, react, or stay quiet by outputting `NO_REPLY` (which suppresses any fallback reply).
 - Direct `@mentions`, replies to the bot, and `mentionPatterns` matches still arrive with `mentioned="true"` and behave like normal direct prompts.
 

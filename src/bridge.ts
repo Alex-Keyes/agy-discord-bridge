@@ -457,9 +457,9 @@ async function handleInbound(msg: Message): Promise<void> {
     void msg.react(access.ackReaction).catch(() => {})
   }
 
-  // Typing indicator loop while agy works (suppressed for unmentioned ambient messages in dynamic mode)
+  // Typing indicator loop while agy works (runs in dynamic mode too so users can see the message was received)
   let typingTimer: ReturnType<typeof setInterval> | null = null
-  if (isSendable(msg.channel) && !isDynamicAmbient) {
+  if (isSendable(msg.channel)) {
     void msg.channel.sendTyping().catch(() => {})
     typingTimer = setInterval(() => {
       if (isSendable(msg.channel)) {
