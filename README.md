@@ -16,6 +16,7 @@ When a message arrives on Discord, the bridge gates it against your allowlist, f
   - `create_thread` (start public threads from a channel or message)
 - **Zero double-posting, zero silent drops, and optional dynamic responses** — if Antigravity calls `reply`, the bridge skips duplicate posting; if it responds in plain text without calling `reply`, the bridge posts the response automatically; and in `--dynamic` channels (or anytime the agent outputs `NO_REPLY`), Antigravity can observe all messages and selectively chime in, react, or stay silent.
 - **Persistent sessions per channel / thread / DM** — keeps a warm `agy` process per chat, queues concurrent turns safely, saves `conversation_id` in `~/.agy-discord/sessions.json` to resume seamlessly across restarts, and reaps idle processes to save memory.
+- **Live terminal stream view** — streams incoming Discord messages, reasoning (`💭 Thinking`), tool calls (`⚙` / `✓`), token-by-token responses, and `NO_REPLY` skips directly in the bridge terminal (toggleable via `AGY_STREAM_LOG` / `AGY_SHOW_THINKING`).
 - **Full access control & security** — DM pairing codes (1h TTL, 2-reply cap, 3-pending cap, confirmation DM on approval), allowlists, per-channel guild opt-in, thread inheritance, reply-to-bot & `mentionPatterns` detection, `DISCORD_ACCESS_MODE=static`, corrupt config recovery, and bot-loop prevention.
 - **Antigravity Plugin included (`./plugin`)** — install with `agy plugin install ./plugin` to get `/discord:access` and `/discord:configure` slash commands in interactive `agy` sessions.
 - **In-chat control commands** — `!agy status`, `!agy reset`, `!agy stop`, `!agy cwd <path>`, `!agy mode <mode>`, `!agy help`.
@@ -126,7 +127,7 @@ Run multiple independent bots on one machine by pointing `DISCORD_STATE_DIR` at 
 DISCORD_STATE_DIR=~/.agy-discord-ops AGY_CWD=/srv/ops bun run start
 ```
 
-See [.env.example](./.env.example) for all environment options (`AGY_CWD`, `AGY_PERMISSION_MODE`, `AGY_MODEL`, `AGY_EFFORT`, `AGY_IDLE_TIMEOUT_MS`, `DISCORD_ACCESS_MODE`, `DISCORD_AUTO_DOWNLOAD_ATTACHMENTS`, `DISCORD_STATE_DIR`).
+See [.env.example](./.env.example) for all environment options (`AGY_CWD`, `AGY_PERMISSION_MODE`, `AGY_MODEL`, `AGY_EFFORT`, `AGY_IDLE_TIMEOUT_MS`, `AGY_STREAM_LOG`, `AGY_SHOW_THINKING`, `DISCORD_ACCESS_MODE`, `DISCORD_AUTO_DOWNLOAD_ATTACHMENTS`, `DISCORD_STATE_DIR`).
 
 ## License
 

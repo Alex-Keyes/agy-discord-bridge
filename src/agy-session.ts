@@ -6,6 +6,14 @@ import {
   type PermissionMode,
   type RuntimeConfig,
 } from './config.ts'
+import {
+  type AgyStepUpdate,
+  type AgyUsage,
+  TerminalStreamLogger,
+  type TurnDisplayMeta,
+} from './stream-logger.ts'
+
+export type { TurnDisplayMeta } from './stream-logger.ts'
 
 export interface SavedSession {
   conversationId: string
@@ -23,12 +31,7 @@ interface AgyInitEvent {
 
 interface AgyStepUpdateEvent {
   event: 'step_update'
-  step_update?: {
-    conversation_id?: string
-    step_type?: string
-    state?: string
-    text_delta?: string
-  }
+  step_update?: AgyStepUpdate
 }
 
 interface AgyResultEvent {
@@ -40,6 +43,7 @@ interface AgyResultEvent {
     error?: string
     duration_seconds?: number
     num_turns?: number
+    usage?: AgyUsage
   }
 }
 
@@ -56,6 +60,7 @@ export interface TurnResult {
 
 interface PendingTurn {
   prompt: string
+  displayMeta?: TurnDisplayMeta
   resolve: (result: TurnResult) => void
   reject: (err: Error) => void
   textBuffer: string
@@ -90,6 +95,7 @@ class ChatSession {
   private readonly runtime: RuntimeConfig
   private readonly extraAddDirs: string[]
   private readonly onPersist: (session: SavedSession) => void
+  private readonly streamLogger: TerminalStreamLogger
 
   private proc: Bun.Subprocess<'pipe', 'pipe', 'pipe'> | null = null
   private queue: PendingTurn[] = []
@@ -112,6 +118,13 @@ class ChatSession {
     this.permissionMode = saved?.permissionMode ?? runtime.permissionMode
     this.conversationId = saved?.conversationId
     this.onPersist = onPersist
+    this.streamLogger = new TerminalStreamLogger({
+      enabled: runtime.streamLog,
+      showThinking: runtime.showThinking,
+    })
+    if (this.conversationId) {
+      this.streamLogger.attachConversation(this.conversationId, true)
+    }
   }
 
   getStatus(): {
@@ -142,22 +155,27 @@ class ChatSession {
     }
   }
 
-  async send(prompt: string): Promise<TurnResult> {
+  logDeliveryOutcome(outcome: string, isSilent = false): void {
+    this.streamLogger.onDeliveryOutcome(outcome, isSilent)
+  }
+
+  async send(prompt: string, displayMeta?: TurnDisplayMeta): Promise<TurnResult> {
     try {
-      return await this.enqueueTurn(prompt)
+      return await this.enqueueTurn(prompt, displayMeta)
     } catch (err) {
       if (this.conversationId && err instanceof Error && err.message.includes('exited unexpectedly')) {
         console.warn(`[agy:${this.chatId}] Resume failed for ${this.conversationId}; retrying fresh session`)
         this.conversationId = undefined
-        return await this.enqueueTurn(prompt)
+        this.streamLogger.resetConversation()
+        return await this.enqueueTurn(prompt, displayMeta)
       }
       throw err
     }
   }
 
-  private enqueueTurn(prompt: string): Promise<TurnResult> {
+  private enqueueTurn(prompt: string, displayMeta?: TurnDisplayMeta): Promise<TurnResult> {
     return new Promise((resolve, reject) => {
-      this.queue.push({ prompt, resolve, reject, textBuffer: '', repliedViaTool: false })
+      this.queue.push({ prompt, displayMeta, resolve, reject, textBuffer: '', repliedViaTool: false })
       this.pumpQueue()
     })
   }
@@ -165,6 +183,7 @@ class ChatSession {
   reset(newCwd?: string, newMode?: PermissionMode): void {
     this.killProcess('Session reset by user')
     this.conversationId = undefined
+    this.streamLogger.resetConversation()
     if (newCwd) this.cwd = newCwd
     if (newMode) this.permissionMode = newMode
   }
@@ -272,6 +291,7 @@ class ChatSession {
 
     try {
       const proc = this.ensureProcess()
+      this.streamLogger.onTurnStart(turn.displayMeta)
       const payload =
         JSON.stringify({
           event: 'user',
@@ -379,6 +399,7 @@ class ChatSession {
       const init = evt as AgyInitEvent
       if (init.conversation_id) {
         this.recordConversationId(init.conversation_id)
+        this.streamLogger.attachConversation(init.conversation_id, false)
       }
       return
     }
@@ -387,6 +408,9 @@ class ChatSession {
       const update = (evt as AgyStepUpdateEvent).step_update
       if (update?.conversation_id) {
         this.recordConversationId(update.conversation_id)
+      }
+      if (update) {
+        this.streamLogger.onStepUpdate(update)
       }
       if (
         this.activeTurn &&
@@ -418,6 +442,7 @@ class ChatSession {
             res?.error && status !== 'SUCCESS'
               ? `${text}\n\n_(status: ${status} — ${res.error})_`
               : text
+          this.streamLogger.onTurnResult(finalText, res?.usage, res?.duration_seconds)
           turn.resolve({
             response: finalText,
             conversationId: this.conversationId,

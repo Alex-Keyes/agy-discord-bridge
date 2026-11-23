@@ -397,8 +397,13 @@ client.once('clientReady', readyClient => {
   const access = accessStore.load()
   const groupCount = Object.keys(access.groups).length
   console.log(`[bridge] Logged in as ${readyClient.user.tag} (${readyClient.user.id})`)
+  const streamMode = runtime.streamLog
+    ? runtime.showThinking
+      ? 'live+thinking'
+      : 'live'
+    : 'off'
   console.log(
-    `[bridge] State: ${stateDir} | CWD: ${runtime.defaultCwd} | Mode: ${runtime.permissionMode} | Static: ${runtime.staticMode} | Channels: ${groupCount}`,
+    `[bridge] State: ${stateDir} | CWD: ${runtime.defaultCwd} | Mode: ${runtime.permissionMode} | Stream: ${streamMode} | Static: ${runtime.staticMode} | Channels: ${groupCount}`,
   )
   console.log(`[bridge] Discord MCP server listening on ${mcpBridge.url}`)
 })
@@ -473,8 +478,25 @@ async function handleInbound(msg: Message): Promise<void> {
       responseMode: result.responseMode,
       mentioned: result.mentioned,
     })
+    const channelLabel =
+      msg.channel.type === ChannelType.DM
+        ? 'DM'
+        : 'name' in msg.channel && msg.channel.name
+          ? `#${msg.channel.name}`
+          : msg.channelId
+    const modeLabel =
+      result.responseMode === 'dynamic'
+        ? result.mentioned
+          ? 'dynamic, mentioned'
+          : 'dynamic'
+        : undefined
     const session = sessions.get(msg.channelId)
-    const turnResult = await session.send(prompt)
+    const turnResult = await session.send(prompt, {
+      channelLabel,
+      author: msg.author.username,
+      preview: cleanedText || (msg.attachments.size > 0 ? '(attachment)' : ''),
+      modeLabel,
+    })
 
     // Only auto-post final text if the agent did not already send via `reply` and did not opt to stay silent.
     if (
@@ -484,6 +506,11 @@ async function handleInbound(msg: Message): Promise<void> {
     ) {
       const text = turnResult.response.trim() || '(completed with no text output)'
       await sendFallbackReply(msg, text, access)
+      session.logDeliveryOutcome('posted to Discord')
+    } else if (turnResult.repliedViaTool) {
+      session.logDeliveryOutcome('replied via Discord tool')
+    } else {
+      session.logDeliveryOutcome('silent (NO_REPLY)', true)
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err)

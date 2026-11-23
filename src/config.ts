@@ -69,6 +69,8 @@ export interface RuntimeConfig {
   idleTimeoutMs: number
   staticMode: boolean
   autoDownloadAttachments: boolean
+  streamLog: boolean
+  showThinking: boolean
 }
 
 export const MAX_CHUNK_LIMIT = 2000
@@ -196,6 +198,8 @@ export function loadRuntimeConfig(stateDir = getStateDir()): RuntimeConfig {
     idleTimeoutMs,
     staticMode: process.env.DISCORD_ACCESS_MODE === 'static',
     autoDownloadAttachments: process.env.DISCORD_AUTO_DOWNLOAD_ATTACHMENTS === 'true',
+    streamLog: process.env.AGY_STREAM_LOG !== 'false' && process.env.AGY_STREAM_LOG !== '0',
+    showThinking: process.env.AGY_SHOW_THINKING !== 'false' && process.env.AGY_SHOW_THINKING !== '0',
   }
 }
 
