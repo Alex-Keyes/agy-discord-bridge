@@ -1,0 +1,13 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "discord",
+  "displayName": "Discord Channel Bridge",
+  "version": "1.0.0",
+  "description": "Manage access control, pairing, guild channels, delivery settings, and bot token configuration for agy-discord-bridge.",
+  "repository": "https://github.com/Alex-Keyes/agy-discord-bridge",
+  "homepage": "https://github.com/Alex-Keyes/agy-discord-bridge",
+  "suggestedPrompts": [
+    "Show my Discord bridge status and who can reach Antigravity",
+    "Help me configure my Discord bot token and lock down the allowlist"
+  ]
+}
