@@ -15,6 +15,16 @@ export interface AgyToolInfo {
   parameters?: Record<string, unknown>
 }
 
+export interface AgySubagentRef {
+  type_name?: string
+  role?: string
+  initial_prompt?: string
+}
+
+export interface AgySubagentInfo {
+  subagents?: AgySubagentRef[]
+}
+
 export interface AgyStepUpdate {
   conversation_id?: string
   step_index?: number
@@ -24,6 +34,7 @@ export interface AgyStepUpdate {
   thinking_delta?: string
   tool_name?: string
   tool_info?: AgyToolInfo
+  subagent_info?: AgySubagentInfo
   duration_seconds?: number
   usage?: AgyUsage
 }
@@ -327,6 +338,33 @@ export class TerminalStreamLogger {
 
     if (update.step_type === 'user_input' && typeof update.step_index === 'number') {
       this.turnMinStepIndex = update.step_index
+      return
+    }
+
+    if (update.step_type === 'subagent') {
+      this.flushOpenStreams()
+      this.emitNewThinking()
+
+      const refs = update.subagent_info?.subagents ?? []
+      const summary =
+        refs.length > 0
+          ? refs
+              .map(r => {
+                const kind = r.type_name || 'subagent'
+                return r.role ? `${kind}: ${r.role}` : kind
+              })
+              .join(', ')
+          : update.tool_name || 'subagent'
+
+      if (update.state === 'ACTIVE') {
+        this.write(`${ansi('35', '🤖', this.color)} ${ansi('35', `subagent(${summary})`, this.color)}\n`)
+      } else if (update.state === 'DONE') {
+        const dur =
+          typeof update.duration_seconds === 'number'
+            ? ` (${update.duration_seconds.toFixed(1)}s)`
+            : ''
+        this.write(`${ansi('2;35', `✓ subagent(${summary})${dur}`, this.color)}\n`)
+      }
       return
     }
 

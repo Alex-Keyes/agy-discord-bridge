@@ -33,6 +33,7 @@ import {
   needsMentionCheck,
   shouldSuppressFallbackReply,
 } from './response-policy.ts'
+import { SubagentManager, formatCompletedUpdatesBlock } from './subagent-manager.ts'
 
 const stateDir = getStateDir()
 const runtime = loadRuntimeConfig(stateDir)
@@ -49,18 +50,107 @@ const client = new Client({
   partials: [Partials.Channel],
 })
 
+const channelLabels = new Map<string, string>()
+
 let sessions: AgySessionManager
+let subagents: SubagentManager
 
-const toolbox = new DiscordToolbox(client, accessStore, (targetChatId, parentChannelId) => {
-  sessions?.markReplied(targetChatId, parentChannelId)
+const toolbox = new DiscordToolbox(
+  client,
+  accessStore,
+  (targetChatId, parentChannelId, caller) => {
+    if (caller.kind === 'subagent') {
+      subagents?.markReplied(caller.subagentId)
+    } else {
+      sessions?.markReplied(targetChatId, parentChannelId)
+    }
+  },
+)
+
+const mcpBridge = startDiscordMcpServer(toolbox, {
+  enableSubagents: runtime.subagentsEnabled,
 })
-
-const mcpBridge = startDiscordMcpServer(toolbox)
 
 sessions = new AgySessionManager(runtime, {
   stateDir,
   extraAddDirs: [mcpBridge.runtimeDir],
 })
+
+async function sendTextToChannel(
+  chatId: string,
+  text: string,
+  access: AccessConfig,
+  replyTo?: string,
+): Promise<void> {
+  const ch = await toolbox.fetchAllowedChannel(chatId)
+  if (!isSendable(ch)) return
+  const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
+  const mode = access.chunkMode ?? 'newline'
+  const replyMode = access.replyToMode ?? 'first'
+  const chunks = chunkText(text, limit, mode)
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i]!
+    const shouldReplyTo =
+      replyTo != null && replyMode !== 'off' && (replyMode === 'all' || i === 0)
+    const sent = await ch.send({
+      content: chunk,
+      ...(shouldReplyTo
+        ? {
+            reply: { messageReference: replyTo, failIfNotExists: false },
+            allowedMentions: { repliedUser: false },
+          }
+        : {}),
+    })
+    if (sent?.id) toolbox.noteSent(sent.id)
+  }
+}
+
+function startChannelTyping(chatId: string): () => void {
+  let stopped = false
+  let timer: ReturnType<typeof setInterval> | null = null
+
+  const pulse = () => {
+    if (stopped) return
+    const cached = client.channels.cache.get(chatId)
+    if (cached && cached.isTextBased() && isSendable(cached)) {
+      void cached.sendTyping().catch(() => {})
+    }
+  }
+
+  pulse()
+  timer = setInterval(pulse, 8000)
+
+  return () => {
+    stopped = true
+    if (timer) {
+      clearInterval(timer)
+      timer = null
+    }
+  }
+}
+
+subagents = new SubagentManager({
+  runtime,
+  createWorkerRuntimeDir: id => mcpBridge.createWorkerRuntimeDir(id),
+  getChatDefaults: chatId => {
+    const st = sessions.get(chatId).getStatus()
+    return {
+      cwd: st.cwd,
+      permissionMode: st.permissionMode,
+      channelLabel: channelLabels.get(chatId),
+    }
+  },
+  deliverText: async (chatId, text, replyTo) => {
+    await sendTextToChannel(chatId, text, accessStore.load(), replyTo)
+  },
+  deliverError: async (chatId, text, replyTo) => {
+    await sendTextToChannel(chatId, text, accessStore.load(), replyTo)
+  },
+  startTyping: chatId => startChannelTyping(chatId),
+})
+
+toolbox.setSubagentHandler(runtime.subagentsEnabled ? subagents : null)
 
 const VALID_MODES: PermissionMode[] = [
   'always-proceed',
@@ -87,17 +177,36 @@ type GateResult =
   | { action: 'drop' }
   | { action: 'pair'; code: string; isResend: boolean }
 
-async function isMentioned(msg: Message, extraPatterns?: string[]): Promise<boolean> {
+function createRefFetcher(msg: Message): () => Promise<Message | null> {
+  let fetched = false
+  let cached: Message | null = null
+  return async () => {
+    if (!msg.reference?.messageId) return null
+    if (!fetched) {
+      fetched = true
+      try {
+        cached = await msg.fetchReference()
+      } catch {
+        cached = null
+      }
+    }
+    return cached
+  }
+}
+
+async function isMentioned(
+  msg: Message,
+  getRef: () => Promise<Message | null>,
+  extraPatterns?: string[],
+): Promise<boolean> {
   if (client.user && msg.mentions.has(client.user)) return true
 
   // Reply to one of our messages counts as an implicit mention.
   const refId = msg.reference?.messageId
   if (refId) {
     if (toolbox.recentSentIds.has(refId)) return true
-    try {
-      const ref = await msg.fetchReference()
-      if (ref.author.id === client.user?.id) return true
-    } catch {}
+    const ref = await getRef()
+    if (ref?.author.id === client.user?.id) return true
   }
 
   const text = msg.content
@@ -109,7 +218,7 @@ async function isMentioned(msg: Message, extraPatterns?: string[]): Promise<bool
   return false
 }
 
-async function gate(msg: Message): Promise<GateResult> {
+async function gate(msg: Message, getRef: () => Promise<Message | null>): Promise<GateResult> {
   const access = accessStore.load()
   const pruned = pruneExpiredPending(access)
   if (pruned) accessStore.save(access)
@@ -146,7 +255,7 @@ async function gate(msg: Message): Promise<GateResult> {
   if (!policy) return { action: 'drop' }
 
   const mentioned = needsMentionCheck(policy)
-    ? await isMentioned(msg, access.mentionPatterns)
+    ? await isMentioned(msg, getRef, access.mentionPatterns)
     : false
   const decision = evaluateGroupPolicy(policy, senderId, mentioned)
   if (decision.action === 'drop') return { action: 'drop' }
@@ -215,7 +324,12 @@ function escapeXmlAttr(val: string): string {
 async function buildInboundPrompt(
   msg: Message,
   cleanedText: string,
-  options?: { responseMode?: GroupResponseMode; mentioned?: boolean },
+  getRef: () => Promise<Message | null>,
+  options?: {
+    responseMode?: GroupResponseMode
+    mentioned?: boolean
+    subagentUpdatesBlock?: string
+  },
 ): Promise<string> {
   const attrs: Array<[string, string]> = [
     ['source', 'discord'],
@@ -237,17 +351,25 @@ async function buildInboundPrompt(
 
   const downloadedNote: string[] = []
   if (msg.attachments.size > 0) {
-    const atts: string[] = []
-    for (const att of msg.attachments.values()) {
+    const attachments = [...msg.attachments.values()]
+    const atts = attachments.map(att => {
       const kb = (att.size / 1024).toFixed(0)
-      atts.push(`${safeAttachmentName(att.name, att.id)} (${att.contentType ?? 'unknown'}, ${kb}KB)`)
-      if (runtime.autoDownloadAttachments) {
-        try {
-          const localPath = await toolbox.downloadAttachment(att)
-          downloadedNote.push(`- ${localPath} (${safeAttachmentName(att.name, att.id)})`)
-        } catch (err) {
-          console.error(`[bridge] Auto-download failed for attachment ${att.id}:`, err)
-        }
+      return `${safeAttachmentName(att.name, att.id)} (${att.contentType ?? 'unknown'}, ${kb}KB)`
+    })
+    if (runtime.autoDownloadAttachments) {
+      const results = await Promise.all(
+        attachments.map(async att => {
+          try {
+            const localPath = await toolbox.downloadAttachment(att)
+            return `- ${localPath} (${safeAttachmentName(att.name, att.id)})`
+          } catch (err) {
+            console.error(`[bridge] Auto-download failed for attachment ${att.id}:`, err)
+            return null
+          }
+        }),
+      )
+      for (const note of results) {
+        if (note) downloadedNote.push(note)
       }
     }
     attrs.push(['attachment_count', String(atts.length)])
@@ -262,11 +384,11 @@ async function buildInboundPrompt(
   const bodyLines: string[] = []
 
   if (msg.reference?.messageId) {
-    try {
-      const ref = await msg.fetchReference()
+    const ref = await getRef()
+    if (ref) {
       const refPreview = ref.content.replace(/[\r\n]+/g, ' ⏎ ').slice(0, 600)
       bodyLines.push(`[Replying to @${ref.author.username} (${ref.id}): ${refPreview}]`)
-    } catch {}
+    }
   }
 
   if (downloadedNote.length > 0) {
@@ -275,7 +397,10 @@ async function buildInboundPrompt(
 
   bodyLines.push(cleanedText || (msg.attachments.size > 0 ? '(attachment)' : ''))
 
-  return `<channel ${attrStr}>\n${bodyLines.join('\n')}\n</channel>`
+  const channelBlock = `<channel ${attrStr}>\n${bodyLines.join('\n')}\n</channel>`
+  return options?.subagentUpdatesBlock
+    ? `${options.subagentUpdatesBlock}\n\n${channelBlock}`
+    : channelBlock
 }
 
 async function sendFallbackReply(msg: Message, text: string, access: AccessConfig): Promise<void> {
@@ -307,9 +432,10 @@ async function handleCommand(msg: Message, text: string): Promise<boolean> {
     const sent = await msg.reply(
       [
         '**Antigravity Discord Bridge Commands**',
-        '- `!agy status` — Show conversation ID, working directory, and permission mode',
-        '- `!agy reset` (or `!agy new`) — Start a fresh conversation for this channel/thread',
-        '- `!agy stop` — Cancel an in-flight turn',
+        '- `!agy status` — Show conversation ID, CWD, permission mode, and active subagents',
+        '- `!agy workers [all]` (or `!agy subagents`) — List active, queued, and recent subagents',
+        '- `!agy reset` (or `!agy new`) — Start a fresh conversation and cancel channel subagents',
+        '- `!agy stop [id|all]` — Cancel active turn, a specific subagent ID, or everything (`all`)',
         '- `!agy cwd <path>` — Switch working directory and start a fresh conversation',
         `- \`!agy mode <${VALID_MODES.join('|')}\>\` — Change permission mode for this channel`,
       ].join('\n'),
@@ -320,6 +446,12 @@ async function handleCommand(msg: Message, text: string): Promise<boolean> {
 
   if (sub === 'status') {
     const st = sessions.get(chatId).getStatus()
+    const saAll = subagents.getSummary()
+    const saChat = subagents.getSummary(chatId)
+    const activeLines = saChat.running.map(r => {
+      const elapsed = r.startedAt ? Math.max(0, Math.round((Date.now() - r.startedAt) / 1000)) : 0
+      return `  - \`${r.id}\` (${r.role}, ${elapsed}s)`
+    })
     const sent = await msg.reply(
       [
         `**Status** (${st.running ? (st.busy ? 'working' : 'idle') : 'stopped'})`,
@@ -327,6 +459,8 @@ async function handleCommand(msg: Message, text: string): Promise<boolean> {
         `- **Permission mode**: \`${st.permissionMode}\``,
         `- **Conversation**: \`${st.conversationId ?? 'new'}\``,
         `- **Queued turns**: ${st.queued}`,
+        `- **Subagents**: ${runtime.subagentsEnabled ? `${saAll.running.length}/${saAll.maxConcurrent} running (${saChat.running.length} in this chat, ${saAll.queued.length} queued)` : 'disabled'}`,
+        ...activeLines,
         st.uptimeSeconds !== undefined ? `- **Process uptime**: ${st.uptimeSeconds}s` : null,
       ]
         .filter(Boolean)
@@ -336,16 +470,48 @@ async function handleCommand(msg: Message, text: string): Promise<boolean> {
     return true
   }
 
+  if (sub === 'workers' || sub === 'subagents') {
+    const scope = parts[1]?.toLowerCase() === 'all' ? undefined : chatId
+    const summary = subagents.list(scope)
+    const sent = await msg.reply(`\`\`\`\n${summary.slice(0, 1900)}\n\`\`\``)
+    toolbox.noteSent(sent.id)
+    return true
+  }
+
   if (sub === 'reset' || sub === 'new') {
     sessions.reset(chatId)
-    const sent = await msg.reply('Started a fresh Antigravity conversation for this channel.')
+    const cancelled = subagents.cancelForChat(chatId)
+    const suffix = cancelled > 0 ? ` Cancelled ${cancelled} background subagent(s).` : ''
+    const sent = await msg.reply(
+      `Started a fresh Antigravity conversation for this channel.${suffix}`,
+    )
     toolbox.noteSent(sent.id)
     return true
   }
 
   if (sub === 'stop' || sub === 'cancel') {
+    const target = parts[1]?.trim()
+    if (target && target.toLowerCase() !== 'all') {
+      const res = subagents.cancel(target)
+      const sent = await msg.reply(res.message)
+      toolbox.noteSent(sent.id)
+      return true
+    }
     sessions.get(chatId).stop()
-    const sent = await msg.reply('Stopped the active Antigravity turn.')
+    if (target?.toLowerCase() === 'all') {
+      const cancelled = subagents.cancelForChat(chatId)
+      const sent = await msg.reply(
+        `Stopped the active Antigravity turn and cancelled ${cancelled} subagent(s).`,
+      )
+      toolbox.noteSent(sent.id)
+      return true
+    }
+    const stillRunning = subagents.getSummary(chatId).running.length
+    const hint =
+      stillRunning > 0
+        ? ` (${stillRunning} background subagent(s) still running — use \`!agy stop all\` or \`!agy stop <id>\` to cancel them.)`
+        : ''
+    const sent = await msg.reply(`Stopped the active Antigravity turn.${hint}`)
     toolbox.noteSent(sent.id)
     return true
   }
@@ -402,8 +568,11 @@ client.once('clientReady', readyClient => {
       ? 'live+thinking'
       : 'live'
     : 'off'
+  const subagentMode = runtime.subagentsEnabled
+    ? `on (max ${runtime.maxSubagents}, coord=${runtime.coordinatorEffort ?? 'default'}, worker=${runtime.subagentEffort ?? 'default'})`
+    : 'off'
   console.log(
-    `[bridge] State: ${stateDir} | CWD: ${runtime.defaultCwd} | Mode: ${runtime.permissionMode} | Stream: ${streamMode} | Static: ${runtime.staticMode} | Channels: ${groupCount}`,
+    `[bridge] State: ${stateDir} | CWD: ${runtime.defaultCwd} | Mode: ${runtime.permissionMode} | Subagents: ${subagentMode} | Stream: ${streamMode} | Static: ${runtime.staticMode} | Channels: ${groupCount}`,
   )
   console.log(`[bridge] Discord MCP server listening on ${mcpBridge.url}`)
 })
@@ -421,7 +590,8 @@ client.on('messageCreate', msg => {
 })
 
 async function handleInbound(msg: Message): Promise<void> {
-  const result = await gate(msg)
+  const getRef = createRefFetcher(msg)
+  const result = await gate(msg, getRef)
 
   if (result.action === 'drop') return
 
@@ -474,16 +644,22 @@ async function handleInbound(msg: Message): Promise<void> {
   }
 
   try {
-    const prompt = await buildInboundPrompt(msg, cleanedText, {
-      responseMode: result.responseMode,
-      mentioned: result.mentioned,
-    })
     const channelLabel =
       msg.channel.type === ChannelType.DM
         ? 'DM'
         : 'name' in msg.channel && msg.channel.name
           ? `#${msg.channel.name}`
           : msg.channelId
+    channelLabels.set(msg.channelId, channelLabel)
+
+    const completedUpdates = subagents.drainCompletedUpdates(msg.channelId)
+    const subagentUpdatesBlock = formatCompletedUpdatesBlock(completedUpdates)
+
+    const prompt = await buildInboundPrompt(msg, cleanedText, getRef, {
+      responseMode: result.responseMode,
+      mentioned: result.mentioned,
+      subagentUpdatesBlock: subagentUpdatesBlock || undefined,
+    })
     const modeLabel =
       result.responseMode === 'dynamic'
         ? result.mentioned
@@ -533,6 +709,7 @@ function shutdown(signal: string): void {
   if (shuttingDown) return
   shuttingDown = true
   console.log(`[bridge] Received ${signal}, shutting down...`)
+  subagents.disposeAll()
   sessions.disposeAll()
   mcpBridge.close()
   setTimeout(() => process.exit(0), 2000)

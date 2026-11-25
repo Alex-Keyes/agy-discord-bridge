@@ -19,6 +19,34 @@ import {
 
 const MAX_EMOJIS_LISTED = 200
 const RECENT_SENT_CAP = 200
+const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+
+export type ToolCaller =
+  | { kind: 'coordinator' }
+  | { kind: 'subagent'; subagentId: string }
+
+export interface SubagentSpawnRequest {
+  chatId: string
+  task: string
+  role?: string
+  replyTo?: string
+  model?: string
+  effort?: string
+  cwd?: string
+}
+
+export interface SubagentSpawnResult {
+  id: string
+  role: string
+  status: 'running' | 'queued'
+  queuePosition?: number
+}
+
+export interface SubagentToolHandler {
+  spawn(req: SubagentSpawnRequest): SubagentSpawnResult
+  list(chatId?: string): string
+  cancel(subagentId: string): { cancelled: boolean; message: string }
+}
 
 export interface DiscordToolDefinition {
   name: string
@@ -144,22 +172,108 @@ export const DISCORD_TOOL_DEFINITIONS: DiscordToolDefinition[] = [
   },
 ]
 
+export const SUBAGENT_TOOL_DEFINITIONS: DiscordToolDefinition[] = [
+  {
+    name: 'spawn_subagent',
+    description:
+      'Spawn an asynchronous background worker subagent (an independent parallel agy process) for heavy or multi-step work so you can reply immediately and keep this Discord channel unblocked. Returns right away with a subagent_id; the worker posts its final answer directly to chat_id (threading under reply_to if provided) when done. Fan out multiple spawn_subagent calls in one turn for independent parallel tasks.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chat_id: {
+          type: 'string',
+          description: 'Allowlisted Discord channel/DM/thread ID where the subagent will deliver its result.',
+        },
+        task: {
+          type: 'string',
+          description:
+            'Self-contained, actionable task instructions including all relevant user context, file paths, and constraints.',
+        },
+        role: {
+          type: 'string',
+          description: 'Short 2-4 word role title (e.g. "Codebase Researcher", "Bug Fixer", "Test Runner").',
+        },
+        reply_to: {
+          type: 'string',
+          description:
+            'Discord message_id to thread the subagent result under (use message_id from the inbound <channel> tag).',
+        },
+        model: {
+          type: 'string',
+          description: 'Optional agy model override for this subagent.',
+        },
+        effort: {
+          type: 'string',
+          enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+          description: 'Optional reasoning effort override for this subagent.',
+        },
+        cwd: {
+          type: 'string',
+          description: 'Optional working directory override (defaults to this channel session CWD).',
+        },
+      },
+      required: ['chat_id', 'task'],
+    },
+  },
+  {
+    name: 'list_subagents',
+    description:
+      'List active, queued, and recently completed background subagents. Optionally filter by chat_id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chat_id: {
+          type: 'string',
+          description: 'Optional Discord channel/DM/thread ID to filter by.',
+        },
+      },
+    },
+  },
+  {
+    name: 'cancel_subagent',
+    description: 'Cancel a running or queued background subagent by its subagent_id (e.g. sa-a1b2c3).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        subagent_id: {
+          type: 'string',
+          description: 'ID of the subagent to cancel.',
+        },
+      },
+      required: ['subagent_id'],
+    },
+  },
+]
+
 export class DiscordToolbox {
   readonly recentSentIds = new Set<string>()
   readonly dmChannelUsers = new Map<string, string>()
 
   private readonly client: Client
   private readonly accessStore: AccessStore
-  private readonly onReplySent?: (chatId: string, parentChannelId?: string | null) => void
+  private readonly onReplySent?: (
+    chatId: string,
+    parentChannelId: string | null | undefined,
+    caller: ToolCaller,
+  ) => void
+  private subagentHandler: SubagentToolHandler | null = null
 
   constructor(
     client: Client,
     accessStore: AccessStore,
-    onReplySent?: (chatId: string, parentChannelId?: string | null) => void,
+    onReplySent?: (
+      chatId: string,
+      parentChannelId: string | null | undefined,
+      caller: ToolCaller,
+    ) => void,
   ) {
     this.client = client
     this.accessStore = accessStore
     this.onReplySent = onReplySent
+  }
+
+  setSubagentHandler(handler: SubagentToolHandler | null): void {
+    this.subagentHandler = handler
   }
 
   noteSent(id: string): void {
@@ -225,11 +339,12 @@ export class DiscordToolbox {
   async callTool(
     name: string,
     args: Record<string, unknown>,
+    caller: ToolCaller = { kind: 'coordinator' },
   ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
     try {
       switch (name) {
         case 'reply':
-          return await this.toolReply(args)
+          return await this.toolReply(args, caller)
         case 'fetch_messages':
           return await this.toolFetchMessages(args)
         case 'react':
@@ -242,6 +357,24 @@ export class DiscordToolbox {
           return await this.toolDownloadAttachment(args)
         case 'create_thread':
           return await this.toolCreateThread(args)
+        case 'spawn_subagent':
+        case 'list_subagents':
+        case 'cancel_subagent':
+          if (caller.kind === 'subagent') {
+            return {
+              content: [{ type: 'text', text: `${name} is only available to the coordinator session` }],
+              isError: true,
+            }
+          }
+          if (!this.subagentHandler) {
+            return {
+              content: [{ type: 'text', text: 'subagents are disabled on this bridge' }],
+              isError: true,
+            }
+          }
+          if (name === 'spawn_subagent') return await this.toolSpawnSubagent(args)
+          if (name === 'list_subagents') return this.toolListSubagents(args)
+          return this.toolCancelSubagent(args)
         default:
           return {
             content: [{ type: 'text', text: `unknown tool: ${name}` }],
@@ -257,7 +390,62 @@ export class DiscordToolbox {
     }
   }
 
-  private async toolReply(args: Record<string, unknown>) {
+  private async toolSpawnSubagent(args: Record<string, unknown>) {
+    const chat_id = String(args.chat_id ?? '').trim()
+    const task = String(args.task ?? '').trim()
+    if (!chat_id) throw new Error('chat_id is required')
+    if (!task) throw new Error('task is required')
+
+    // Enforce the same outbound allowlist gate as reply/react.
+    await this.fetchAllowedChannel(chat_id)
+
+    const effort = args.effort ? String(args.effort).trim() : undefined
+    if (effort && !VALID_EFFORTS.has(effort)) {
+      throw new Error(`invalid effort "${effort}" (expected one of: low, medium, high, xhigh, max)`)
+    }
+
+    const res = this.subagentHandler!.spawn({
+      chatId: chat_id,
+      task,
+      role: args.role ? String(args.role).trim() : undefined,
+      replyTo: args.reply_to ? String(args.reply_to).trim() : undefined,
+      model: args.model ? String(args.model).trim() : undefined,
+      effort,
+      cwd: args.cwd ? String(args.cwd).trim() : undefined,
+    })
+
+    const stateNote =
+      res.status === 'queued'
+        ? `queued (position ${res.queuePosition ?? 1})`
+        : 'running'
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `spawned subagent ${res.id} (role: ${res.role}, status: ${stateNote}). It will deliver its result directly to chat ${chat_id} when done.`,
+        },
+      ],
+    }
+  }
+
+  private toolListSubagents(args: Record<string, unknown>) {
+    const chatId = args.chat_id ? String(args.chat_id).trim() : undefined
+    return {
+      content: [{ type: 'text' as const, text: this.subagentHandler!.list(chatId) }],
+    }
+  }
+
+  private toolCancelSubagent(args: Record<string, unknown>) {
+    const subagentId = String(args.subagent_id ?? '').trim()
+    if (!subagentId) throw new Error('subagent_id is required')
+    const res = this.subagentHandler!.cancel(subagentId)
+    return {
+      content: [{ type: 'text' as const, text: res.message }],
+      ...(res.cancelled ? {} : { isError: true }),
+    }
+  }
+
+  private async toolReply(args: Record<string, unknown>, caller: ToolCaller) {
     const chat_id = String(args.chat_id ?? '')
     const text = String(args.text ?? '')
     const reply_to = args.reply_to ? String(args.reply_to) : undefined
@@ -310,7 +498,7 @@ export class DiscordToolbox {
     }
 
     const parentId = ch.isThread() ? ch.parentId : null
-    this.onReplySent?.(ch.id, parentId)
+    this.onReplySent?.(ch.id, parentId, caller)
 
     const summary =
       sentIds.length === 1

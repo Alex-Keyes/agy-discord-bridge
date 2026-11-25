@@ -66,6 +66,13 @@ export interface RuntimeConfig {
   permissionMode: PermissionMode
   model?: string
   effort?: string
+  coordinatorModel?: string
+  coordinatorEffort?: string
+  subagentModel?: string
+  subagentEffort?: string
+  subagentsEnabled: boolean
+  maxSubagents: number
+  subagentTimeoutMs: number
   idleTimeoutMs: number
   staticMode: boolean
   autoDownloadAttachments: boolean
@@ -181,6 +188,16 @@ export function loadRuntimeConfig(stateDir = getStateDir()): RuntimeConfig {
   const idleRaw = Number(process.env.AGY_IDLE_TIMEOUT_MS ?? 30 * 60 * 1000)
   const idleTimeoutMs = Number.isFinite(idleRaw) && idleRaw >= 0 ? idleRaw : 30 * 60 * 1000
 
+  const maxSubagentsRaw = Number(process.env.AGY_MAX_SUBAGENTS ?? 4)
+  const maxSubagents =
+    Number.isFinite(maxSubagentsRaw) && maxSubagentsRaw >= 1 ? Math.floor(maxSubagentsRaw) : 4
+
+  const subagentTimeoutRaw = Number(process.env.AGY_SUBAGENT_TIMEOUT_MS ?? 15 * 60 * 1000)
+  const subagentTimeoutMs =
+    Number.isFinite(subagentTimeoutRaw) && subagentTimeoutRaw >= 0
+      ? subagentTimeoutRaw
+      : 15 * 60 * 1000
+
   const cwdEnv = process.env.AGY_CWD?.trim()
   const defaultCwd = cwdEnv
     ? cwdEnv.startsWith('~/')
@@ -188,13 +205,31 @@ export function loadRuntimeConfig(stateDir = getStateDir()): RuntimeConfig {
       : resolve(cwdEnv)
     : process.cwd()
 
+  const subagentsEnabled =
+    process.env.AGY_SUBAGENTS !== 'false' && process.env.AGY_SUBAGENTS !== '0'
+  const baseModel = process.env.AGY_MODEL?.trim() || undefined
+  const baseEffort = process.env.AGY_EFFORT?.trim() || undefined
+
   return {
     token,
     agyBin: process.env.AGY_BIN?.trim() || 'agy',
     defaultCwd,
     permissionMode,
-    model: process.env.AGY_MODEL?.trim() || undefined,
-    effort: process.env.AGY_EFFORT?.trim() || undefined,
+    model: baseModel,
+    effort: baseEffort,
+    coordinatorModel: process.env.AGY_COORDINATOR_MODEL?.trim() || baseModel,
+    coordinatorEffort:
+      process.env.AGY_COORDINATOR_EFFORT?.trim() ||
+      baseEffort ||
+      (subagentsEnabled ? 'low' : undefined),
+    subagentModel: process.env.AGY_SUBAGENT_MODEL?.trim() || baseModel,
+    subagentEffort:
+      process.env.AGY_SUBAGENT_EFFORT?.trim() ||
+      baseEffort ||
+      (subagentsEnabled ? 'high' : undefined),
+    subagentsEnabled,
+    maxSubagents,
+    subagentTimeoutMs,
     idleTimeoutMs,
     staticMode: process.env.DISCORD_ACCESS_MODE === 'static',
     autoDownloadAttachments: process.env.DISCORD_AUTO_DOWNLOAD_ATTACHMENTS === 'true',

@@ -138,6 +138,27 @@ describe('TerminalStreamLogger', () => {
     })
     logger.onStepUpdate({
       conversation_id: convId,
+      step_index: 2,
+      step_type: 'subagent',
+      state: 'ACTIVE',
+      tool_name: 'invoke_subagent',
+      subagent_info: {
+        subagents: [{ type_name: 'research', role: 'Codebase Scout' }],
+      },
+    })
+    logger.onStepUpdate({
+      conversation_id: convId,
+      step_index: 2,
+      step_type: 'subagent',
+      state: 'DONE',
+      tool_name: 'invoke_subagent',
+      duration_seconds: 0.9,
+      subagent_info: {
+        subagents: [{ type_name: 'research', role: 'Codebase Scout' }],
+      },
+    })
+    logger.onStepUpdate({
+      conversation_id: convId,
       step_index: 3,
       step_type: 'agent_response',
       state: 'ACTIVE',
@@ -160,6 +181,8 @@ describe('TerminalStreamLogger', () => {
     expect(output).toContain('  Let me run the tests.')
     expect(output).toContain('⚙ run_command(bun test)')
     expect(output).toContain('✓ run_command (0.4s)')
+    expect(output).toContain('🤖 subagent(research: Codebase Scout)')
+    expect(output).toContain('✓ subagent(research: Codebase Scout) (0.9s)')
     expect(output).toContain('All green!')
     expect(output).toContain('1.2s · in: 1.0k · out: 20')
     expect(output).toContain('↳ posted to Discord')

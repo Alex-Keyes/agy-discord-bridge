@@ -85,4 +85,133 @@ describe('in-process Streamable HTTP MCP server', () => {
     // Ephemeral runtimeDir cleaned up on close()
     expect(existsSync(srv.runtimeDir)).toBe(false)
   })
+
+  test('exposes subagent tools on coordinator /mcp and isolates worker /mcp/worker/<id>', async () => {
+    const calls: Array<{
+      name: string
+      args: Record<string, unknown>
+      caller?: { kind: string; subagentId?: string }
+    }> = []
+
+    const srv = startDiscordMcpServer(
+      {
+        async callTool(name, args, caller) {
+          calls.push({ name, args, caller })
+          return { content: [{ type: 'text', text: `ok:${name}` }] }
+        },
+      },
+      { enableSubagents: true },
+    )
+
+    let workerDir = ''
+    try {
+      const authHeaders = {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        authorization: `Bearer ${srv.bearerToken}`,
+      }
+
+      // Coordinator AGENTS.md includes subagent delegation instructions
+      const coordAgentsMd = readFileSync(join(srv.runtimeDir, 'AGENTS.md'), 'utf8')
+      expect(coordAgentsMd).toContain('spawn_subagent')
+
+      // Coordinator /mcp lists all 10 tools
+      const coordListRes = await fetch(srv.url, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+      })
+      expect(coordListRes.status).toBe(200)
+      const coordListBody = (await coordListRes.json()) as {
+        result: { tools: Array<{ name: string }> }
+      }
+      expect(coordListBody.result.tools.map(t => t.name).sort()).toEqual([
+        'cancel_subagent',
+        'create_thread',
+        'download_attachment',
+        'edit_message',
+        'fetch_messages',
+        'list_emojis',
+        'list_subagents',
+        'react',
+        'reply',
+        'spawn_subagent',
+      ])
+
+      // Worker runtime workspace points to /mcp/worker/<id>
+      workerDir = srv.createWorkerRuntimeDir('sa-abc123')
+      const workerCfg = JSON.parse(
+        readFileSync(join(workerDir, '.agents', 'mcp_config.json'), 'utf8'),
+      )
+      const workerUrl = workerCfg.mcpServers.discord.serverUrl as string
+      expect(workerUrl).toEndWith('/mcp/worker/sa-abc123')
+
+      // Worker endpoint rejects unauthenticated requests
+      const unauthWorker = await fetch(workerUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+      })
+      expect(unauthWorker.status).toBe(401)
+
+      // Worker endpoint exposes ONLY the 7 Discord tools (no recursive spawn_subagent)
+      const workerListRes = await fetch(workerUrl, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }),
+      })
+      expect(workerListRes.status).toBe(200)
+      const workerListBody = (await workerListRes.json()) as {
+        result: { tools: Array<{ name: string }> }
+      }
+      expect(workerListBody.result.tools.map(t => t.name).sort()).toEqual([
+        'create_thread',
+        'download_attachment',
+        'edit_message',
+        'fetch_messages',
+        'list_emojis',
+        'react',
+        'reply',
+      ])
+
+      // Calls on coordinator vs worker endpoints attribute caller accurately
+      await fetch(srv.url, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 4,
+          method: 'tools/call',
+          params: { name: 'reply', arguments: { chat_id: 'c1', text: 'coord' } },
+        }),
+      })
+      await fetch(workerUrl, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 5,
+          method: 'tools/call',
+          params: { name: 'reply', arguments: { chat_id: 'c1', text: 'worker' } },
+        }),
+      })
+
+      expect(calls).toEqual([
+        {
+          name: 'reply',
+          args: { chat_id: 'c1', text: 'coord' },
+          caller: { kind: 'coordinator' },
+        },
+        {
+          name: 'reply',
+          args: { chat_id: 'c1', text: 'worker' },
+          caller: { kind: 'subagent', subagentId: 'sa-abc123' },
+        },
+      ])
+    } finally {
+      srv.close()
+    }
+
+    expect(existsSync(workerDir)).toBe(false)
+  })
 })

@@ -8,6 +8,7 @@ import {
   clearBotToken,
   defaultAccess,
   issuePairingCode,
+  loadRuntimeConfig,
   pruneExpiredPending,
   readAccessFile,
   readStoredToken,
@@ -141,6 +142,41 @@ describe('security guards and token storage', () => {
       expect(readStoredToken(dir).token).toBeUndefined()
     } finally {
       if (prevEnv !== undefined) process.env.DISCORD_BOT_TOKEN = prevEnv
+    }
+  })
+
+  test('loadRuntimeConfig defaults coordinatorEffort to low and subagentEffort to high when subagents are enabled', () => {
+    const dir = makeTempDir()
+    const keys = [
+      'DISCORD_BOT_TOKEN',
+      'AGY_SUBAGENTS',
+      'AGY_EFFORT',
+      'AGY_COORDINATOR_EFFORT',
+      'AGY_SUBAGENT_EFFORT',
+    ] as const
+    const prev = Object.fromEntries(keys.map(k => [k, process.env[k]]))
+    try {
+      process.env.DISCORD_BOT_TOKEN = 'test-token'
+      delete process.env.AGY_SUBAGENTS
+      delete process.env.AGY_EFFORT
+      delete process.env.AGY_COORDINATOR_EFFORT
+      delete process.env.AGY_SUBAGENT_EFFORT
+
+      const cfg = loadRuntimeConfig(dir)
+      expect(cfg.subagentsEnabled).toBe(true)
+      expect(cfg.coordinatorEffort).toBe('low')
+      expect(cfg.subagentEffort).toBe('high')
+
+      process.env.AGY_COORDINATOR_EFFORT = 'medium'
+      process.env.AGY_SUBAGENT_EFFORT = 'xhigh'
+      const custom = loadRuntimeConfig(dir)
+      expect(custom.coordinatorEffort).toBe('medium')
+      expect(custom.subagentEffort).toBe('xhigh')
+    } finally {
+      for (const k of keys) {
+        if (prev[k] === undefined) delete process.env[k]
+        else process.env[k] = prev[k]
+      }
     }
   })
 })

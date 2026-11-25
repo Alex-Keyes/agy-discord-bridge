@@ -14,12 +14,13 @@ When a message arrives on Discord, the bridge gates it against your allowlist, f
   - `fetch_messages` (oldest-first history lookback up to 100 messages with `+Natt` markers)
   - `download_attachment` (on-demand download to local inbox)
   - `create_thread` (start public threads from a channel or message)
+- **Parallel background subagents (`spawn_subagent`, `list_subagents`, `cancel_subagent`)** — each channel session acts as a fast coordinator that answers simple messages immediately and delegates heavy or multi-step work to parallel background `agy` worker processes (configurable concurrency via `AGY_MAX_SUBAGENTS`, isolated per-worker MCP endpoints, zero head-of-line blocking, automatic `<subagent_updates>` context handoff back to the coordinator, and independent `AGY_COORDINATOR_EFFORT` / `AGY_SUBAGENT_EFFORT` tuning).
 - **Zero double-posting, zero silent drops, and optional dynamic responses** — if Antigravity calls `reply`, the bridge skips duplicate posting; if it responds in plain text without calling `reply`, the bridge posts the response automatically; and in `--dynamic` channels (or anytime the agent outputs `NO_REPLY`), Antigravity can observe all messages and selectively chime in, react, or stay silent.
 - **Persistent sessions per channel / thread / DM** — keeps a warm `agy` process per chat, queues concurrent turns safely, saves `conversation_id` in `~/.agy-discord/sessions.json` to resume seamlessly across restarts, and reaps idle processes to save memory.
-- **Live terminal stream view** — streams incoming Discord messages, reasoning (`💭 Thinking`), tool calls (`⚙` / `✓`), token-by-token responses, and `NO_REPLY` skips directly in the bridge terminal (toggleable via `AGY_STREAM_LOG` / `AGY_SHOW_THINKING`).
+- **Live terminal stream view** — streams incoming Discord messages, reasoning (`💭 Thinking`), tool calls (`⚙` / `✓`), subagent launches (`🤖`), token-by-token responses, and `NO_REPLY` skips directly in the bridge terminal (toggleable via `AGY_STREAM_LOG` / `AGY_SHOW_THINKING`).
 - **Full access control & security** — DM pairing codes (1h TTL, 2-reply cap, 3-pending cap, confirmation DM on approval), allowlists, per-channel guild opt-in, thread inheritance, reply-to-bot & `mentionPatterns` detection, `DISCORD_ACCESS_MODE=static`, corrupt config recovery, and bot-loop prevention.
 - **Antigravity Plugin included (`./plugin`)** — install with `agy plugin install ./plugin` to get `/discord:access` and `/discord:configure` slash commands in interactive `agy` sessions.
-- **In-chat control commands** — `!agy status`, `!agy reset`, `!agy stop`, `!agy cwd <path>`, `!agy mode <mode>`, `!agy help`.
+- **In-chat control commands** — `!agy status`, `!agy workers`, `!agy reset`, `!agy stop [id|all]`, `!agy cwd <path>`, `!agy mode <mode>`, `!agy help`.
 
 ## Prerequisites
 
@@ -103,6 +104,9 @@ See **[ACCESS.md](./ACCESS.md)** for full access control, mention regexes, and d
 | `fetch_messages` | Fetch recent channel history oldest-first (up to 100 messages) with IDs and `+Natt` attachment markers. |
 | `download_attachment` | Download attachments from a message ID into `~/.agy-discord/inbox/` and return local paths. |
 | `create_thread` | Start a public thread in an opted-in text/announcement channel and return its `chat_id`. |
+| `spawn_subagent` | *(Coordinator only)* Spawn an asynchronous parallel `agy` worker subagent for heavy/multi-step tasks so the channel stays immediately responsive. |
+| `list_subagents` | *(Coordinator only)* List running, queued, and recently completed background subagents. |
+| `cancel_subagent` | *(Coordinator only)* Cancel a running or queued background subagent by ID. |
 
 ## Parity with Claude Code's Official Discord Connector
 

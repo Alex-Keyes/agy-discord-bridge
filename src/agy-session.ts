@@ -227,12 +227,14 @@ class ChatSession {
       args.push('--conversation', this.conversationId)
     }
 
-    if (this.runtime.model) {
-      args.push('--model', this.runtime.model)
+    const model = this.runtime.coordinatorModel ?? this.runtime.model
+    if (model) {
+      args.push('--model', model)
     }
 
-    if (this.runtime.effort) {
-      args.push('--effort', this.runtime.effort)
+    const effort = this.runtime.coordinatorEffort ?? this.runtime.effort
+    if (effort) {
+      args.push('--effort', effort)
     }
 
     switch (this.permissionMode) {
